@@ -585,6 +585,95 @@ async function run() {
     const findRequest = (id) =>
       requestCollection.findOne({ _id: new ObjectId(id) });
 
+    app.patch('/requests/approve/:id', verifyToken, async (req, res) => {
+      try {
+        if (!isValidId(req.params.id)) {
+          return res.status(400).send({ message: 'invalid request id' });
+        }
+        const request = await findRequest(req.params.id);
+        if (!request) return res.status(404).send({ message: 'request not found' });
+        if (request.status === 'approved') {
+          return res.send({ message: 'request already approved', modifiedCount: 0 });
+        }
+        const result = await requestCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { status: 'approved', approvalDate: new Date() } }
+        );
+        // Approving hands the asset out: quantity goes down by 1, never below 0.
+        if (request.assetId && isValidId(request.assetId)) {
+          const asset = await assetCollection.findOne({
+            _id: new ObjectId(request.assetId),
+          });
+          if (asset) {
+            await assetCollection.updateOne(
+              { _id: asset._id },
+              { $set: { quantity: Math.max(0, (asset.quantity || 0) - 1) } }
+            );
+          }
+        }
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to approve request', error: error.message });
+      }
+    });
+
+    app.patch('/requests/reject/:id', verifyToken, async (req, res) => {
+      try {
+        if (!isValidId(req.params.id)) {
+          return res.status(400).send({ message: 'invalid request id' });
+        }
+        const result = await requestCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { status: 'rejected' } }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to reject request', error: error.message });
+      }
+    });
+
+    app.patch('/requests/cancel/:id', verifyToken, async (req, res) => {
+      try {
+        if (!isValidId(req.params.id)) {
+          return res.status(400).send({ message: 'invalid request id' });
+        }
+        const result = await requestCollection.updateOne(
+          { _id: new ObjectId(req.params.id), status: 'pending' },
+          { $set: { status: 'cancelled' } }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to cancel request', error: error.message });
+      }
+    });
+
+    app.patch('/requests/return/:id', verifyToken, async (req, res) => {
+      try {
+        if (!isValidId(req.params.id)) {
+          return res.status(400).send({ message: 'invalid request id' });
+        }
+        const request = await findRequest(req.params.id);
+        if (!request) return res.status(404).send({ message: 'request not found' });
+        if (request.status === 'returned') {
+          return res.send({ message: 'asset already returned', modifiedCount: 0 });
+        }
+        const result = await requestCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { status: 'returned', returnDate: new Date() } }
+        );
+        // Returning puts the asset back in stock.
+        if (request.assetId && isValidId(request.assetId)) {
+          await assetCollection.updateOne(
+            { _id: new ObjectId(request.assetId) },
+            { $inc: { quantity: 1 } }
+          );
+        }
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to return asset', error: error.message });
+      }
+    });
+
     console.log('Asset Management server routes are ready');
   } catch (error) {
     // Never let a database/setup problem stop the HTTP server from listening.
