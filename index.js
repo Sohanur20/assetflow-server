@@ -749,6 +749,103 @@ async function run() {
       }
     });
 
+    // ---------------- payments ----------------
+    app.post('/create-payment-intent', verifyToken, async (req, res) => {
+      try {
+        const price = parseFloat(req.body?.price);
+        if (!price || price <= 0) {
+          return res.status(400).send({ message: 'a valid price is required' });
+        }
+        if (!stripe) {
+          return res.status(500).send({ message: 'Stripe is not configured on the server' });
+        }
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: Math.round(price * 100), // Stripe charges in cents
+          currency: 'usd',
+          payment_method_types: ['card'],
+        });
+        res.send({ clientSecret: paymentIntent.client_secret });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to create payment intent', error: error.message });
+      }
+    });
+
+    app.post('/payments', verifyToken, async (req, res) => {
+      try {
+        const body = req.body;
+        const hrEmail = body.hrEmail || body.email || req.decoded.email;
+        // Client sends memberLimit (and packageName like 'Starter
+        // Team'); accept members / memberLimit / package name or id.
+        const members =
+          parseInt(body.members, 10) ||
+          parseInt(body.memberLimit, 10) ||
+          packageMembers(body.packageName) ||
+          packageMembers(body.packageId);
+        if (!hrEmail || !members) {
+          return res.status(400).send({ message: 'hrEmail and a valid package are required' });
+        }
+        const payment = {
+          hrEmail,
+          packageName: body.packageName || `${members} Members`,
+          amount: body.amount ?? body.price ?? PACKAGES[body.packageName]?.price ?? null,
+          members,
+          transactionId: body.transactionId || '',
+          date: new Date(),
+        };
+        const paymentResult = await paymentCollection.insertOne(payment);
+
+        // Payment activates / extends the HR account: the purchased member
+        // count is added to the current limit and paid is set true.
+        const userResult = await userCollection.updateOne(
+          { email: hrEmail },
+          {
+            $inc: { memberLimit: members },
+            $set: { paid: true, packageName: payment.packageName },
+          }
+        );
+        res.send({ paymentResult, userResult });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to save payment', error: error.message });
+      }
+    });
+
+    // Alias used by some clients after payment instead of POST /payments.
+    app.patch('/users/package', verifyToken, async (req, res) => {
+      try {
+        const hrEmail = req.body?.hrEmail || req.body?.email || req.decoded.email;
+        const members =
+          parseInt(req.body?.members, 10) ||
+          parseInt(req.body?.memberLimit, 10) ||
+          packageMembers(req.body?.packageName) ||
+          packageMembers(req.body?.packageId);
+        if (!members) {
+          return res.status(400).send({ message: 'a valid package is required' });
+        }
+        const result = await userCollection.updateOne(
+          { email: hrEmail },
+          {
+            $inc: { memberLimit: members },
+            $set: { paid: true, packageName: req.body.packageName },
+          }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to update package', error: error.message });
+      }
+    });
+
+    app.get('/payments/:email', verifyToken, async (req, res) => {
+      try {
+        const payments = await paymentCollection
+          .find({ hrEmail: req.params.email })
+          .sort({ date: -1 })
+          .toArray();
+        res.send(payments);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load payments', error: error.message });
+      }
+    });
+
     console.log('Asset Management server routes are ready');
   } catch (error) {
     // Never let a database/setup problem stop the HTTP server from listening.
