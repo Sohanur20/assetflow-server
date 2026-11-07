@@ -386,6 +386,127 @@ async function run() {
       }
     });
 
+    // ---------------- assets ----------------
+    app.post('/assets', verifyToken, verifyHR, async (req, res) => {
+      try {
+        const body = req.body;
+        const hrEmail = body.hrEmail || req.decoded.email;
+        const hrUser =
+          req.hrUser?.email === hrEmail
+            ? req.hrUser
+            : await userCollection.findOne({ email: hrEmail });
+        const asset = {
+          productName: body.productName || '',
+          productType: body.productType || 'returnable',
+          quantity: parseInt(body.quantity ?? body.productQuantity, 10) || 0,
+          dateAdded: body.dateAdded ? new Date(body.dateAdded) : new Date(),
+          hrEmail,
+          companyName: body.companyName || hrUser?.companyName || '',
+          companyLogo: body.companyLogo || hrUser?.companyLogo || '',
+        };
+        const result = await assetCollection.insertOne(asset);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to add asset', error: error.message });
+      }
+    });
+
+    app.get('/assets/hr', verifyToken, async (req, res) => {
+      try {
+        const { search, stock, type } = req.query;
+        // Client relies on the JWT instead of sending its email.
+        const email = req.query.email || req.decoded.email;
+        const sortByQuantity = req.query.sortByQuantity || req.query.sort;
+        const { limit, skip } = pageParams(req);
+        const query = { hrEmail: email };
+        if (search) query.productName = { $regex: escapeRegex(search), $options: 'i' };
+        if (type) query.productType = type;
+        if (stock) {
+          if (String(stock).toLowerCase().includes('out')) query.quantity = { $lte: 0 };
+          else query.quantity = { $gt: 0 };
+        }
+        const total = await assetCollection.countDocuments(query);
+        let cursor = assetCollection.find(query);
+        if (sortByQuantity) {
+          const direction =
+            sortByQuantity === 'desc' || sortByQuantity === '-1' ? -1 : 1;
+          cursor = cursor.sort({ quantity: direction });
+        } else {
+          cursor = cursor.sort({ dateAdded: -1 });
+        }
+        const assets = await cursor.skip(skip).limit(limit).toArray();
+        res.send({ assets, total });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load assets', error: error.message });
+      }
+    });
+
+    app.get('/assets/employee', verifyToken, async (req, res) => {
+      try {
+        const { search, availability, type } = req.query;
+        // Client relies on the JWT: resolve the employee's HR from
+        // their own user record when hrEmail is not sent explicitly.
+        let hrEmail = req.query.hrEmail;
+        if (!hrEmail) {
+          const me = await userCollection.findOne({ email: req.decoded.email });
+          hrEmail = me?.role === 'hr' ? me.email : me?.hrEmail;
+        }
+        if (!hrEmail) return res.status(400).send({ message: 'hrEmail is required' });
+        const { limit, skip } = pageParams(req);
+        const query = { hrEmail };
+        if (search) query.productName = { $regex: escapeRegex(search), $options: 'i' };
+        if (type) query.productType = type;
+        if (availability) {
+          if (String(availability).toLowerCase().includes('out')) query.quantity = { $lte: 0 };
+          else query.quantity = { $gt: 0 };
+        }
+        const total = await assetCollection.countDocuments(query);
+        const assets = await assetCollection
+          .find(query)
+          .sort({ dateAdded: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+        res.send({ assets, total });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load assets', error: error.message });
+      }
+    });
+
+    app.patch('/assets/:id', verifyToken, async (req, res) => {
+      try {
+        if (!isValidId(req.params.id)) {
+          return res.status(400).send({ message: 'invalid asset id' });
+        }
+        const update = {};
+        if (req.body.productName !== undefined) update.productName = req.body.productName;
+        if (req.body.productType !== undefined) update.productType = req.body.productType;
+        const qty = req.body.quantity ?? req.body.productQuantity;
+        if (qty !== undefined) update.quantity = parseInt(qty, 10) || 0;
+        const result = await assetCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: update }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to update asset', error: error.message });
+      }
+    });
+
+    app.delete('/assets/:id', verifyToken, async (req, res) => {
+      try {
+        if (!isValidId(req.params.id)) {
+          return res.status(400).send({ message: 'invalid asset id' });
+        }
+        const result = await assetCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to delete asset', error: error.message });
+      }
+    });
+
     console.log('Asset Management server routes are ready');
   } catch (error) {
     // Never let a database/setup problem stop the HTTP server from listening.
