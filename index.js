@@ -122,6 +122,22 @@ async function run() {
       res.send('XYZ Asset Management server is running');
     });
 
+    // ---------------- jwt ----------------
+    app.post('/jwt', async (req, res) => {
+      try {
+        const user = req.body; // expects { email }
+        if (!user?.email) {
+          return res.status(400).send({ message: 'email is required' });
+        }
+        const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
+          expiresIn: '1h',
+        });
+        res.send({ token });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to create token', error: error.message });
+      }
+    });
+
     console.log('Asset Management server routes are ready');
   } catch (error) {
     // Never let a database/setup problem stop the HTTP server from listening.
