@@ -234,6 +234,158 @@ async function run() {
       }
     });
 
+    // Add ONE employee to an HR's team, enforcing the package member limit.
+    app.patch('/add-to-team', verifyToken, async (req, res) => {
+      try {
+        // Client sends { email, hrEmail }; accept employeeEmail too.
+        const employeeEmail = req.body.employeeEmail || req.body.email;
+        const { hrEmail } = req.body;
+        if (!employeeEmail || !hrEmail) {
+          return res.status(400).send({ message: 'employeeEmail and hrEmail are required' });
+        }
+        const hrUser = await userCollection.findOne({ email: hrEmail, role: 'hr' });
+        if (!hrUser) return res.status(404).send({ message: 'HR manager not found' });
+
+        const employee = await userCollection.findOne({ email: employeeEmail });
+        if (!employee) return res.status(404).send({ message: 'employee not found' });
+        if (employee.hrEmail) {
+          return res.status(400).send({ message: 'employee is already affiliated with a company' });
+        }
+
+        const currentCount = await teamCount(hrEmail);
+        const limit = hrUser.memberLimit || 0;
+        if (currentCount >= limit) {
+          return res.status(403).send({
+            message: 'Member limit reached. Please increase your package limit.',
+          });
+        }
+
+        const result = await userCollection.updateOne(
+          { email: employeeEmail },
+          {
+            $set: {
+              hrEmail,
+              companyName: hrUser.companyName || '',
+              companyLogo: hrUser.companyLogo || '',
+            },
+          }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to add employee to team', error: error.message });
+      }
+    });
+
+    // CHALLENGE: add many employees in ONE API call. The whole batch is
+    // rejected if it would push the team past the HR's member limit.
+    app.patch('/add-selected-to-team', verifyToken, async (req, res) => {
+      try {
+        // Client sends { emails, hrEmail }; accept employeeEmails too.
+        const employeeEmails = req.body.employeeEmails || req.body.emails;
+        const { hrEmail } = req.body;
+        if (!Array.isArray(employeeEmails) || !employeeEmails.length || !hrEmail) {
+          return res.status(400).send({ message: 'employeeEmails array and hrEmail are required' });
+        }
+        const hrUser = await userCollection.findOne({ email: hrEmail, role: 'hr' });
+        if (!hrUser) return res.status(404).send({ message: 'HR manager not found' });
+
+        // Only employees who exist and are still unaffiliated can be added.
+        const addable = await userCollection
+          .find({
+            email: { $in: employeeEmails },
+            role: 'employee',
+            $or: [{ hrEmail: null }, { hrEmail: { $exists: false } }],
+          })
+          .project({ email: 1 })
+          .toArray();
+        const addableEmails = addable.map((u) => u.email);
+        if (!addableEmails.length) {
+          return res.status(400).send({ message: 'no unaffiliated employees to add' });
+        }
+
+        const currentCount = await teamCount(hrEmail);
+        const limit = hrUser.memberLimit || 0;
+        if (currentCount + addableEmails.length > limit) {
+          return res.status(403).send({
+            message: `Member limit reached. Your package allows ${limit} members, current team is ${currentCount}, and you selected ${addableEmails.length}.`,
+          });
+        }
+
+        const result = await userCollection.updateMany(
+          { email: { $in: addableEmails } },
+          {
+            $set: {
+              hrEmail,
+              companyName: hrUser.companyName || '',
+              companyLogo: hrUser.companyLogo || '',
+            },
+          }
+        );
+        res.send({ ...result, addedCount: result.modifiedCount });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to add selected employees', error: error.message });
+      }
+    });
+
+    app.patch('/remove-from-team/:email', verifyToken, async (req, res) => {
+      try {
+        const result = await userCollection.updateOne(
+          { email: req.params.email },
+          { $set: { hrEmail: null, companyName: '', companyLogo: '' } }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to remove employee from team', error: error.message });
+      }
+    });
+
+    // My Team (employee view) / team members of an HR.
+    app.get('/my-team', verifyToken, async (req, res) => {
+      try {
+        const { email } = req.query;
+        if (!email) return res.status(400).send({ message: 'email is required' });
+        const user = await userCollection.findOne({ email });
+        if (!user) return res.status(404).send({ message: 'user not found' });
+        const hrEmail = user.role === 'hr' ? user.email : user.hrEmail;
+        if (!hrEmail) return res.send({ hr: null, team: [], total: 0 });
+        const hr = await userCollection.findOne({ email: hrEmail });
+        const team = await userCollection.find({ hrEmail }).toArray();
+        res.send({ hr, team, total: team.length });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load team', error: error.message });
+      }
+    });
+
+    // Team members for the client: GET /team-members?hrEmail=<hr email>
+    // Used by both the employee "My Team" page and the HR "My Employee
+    // List" page. Members include the HR manager (as admin) followed by
+    // every employee affiliated with that HR.
+    app.get('/team-members', verifyToken, async (req, res) => {
+      try {
+        const hrEmail = req.query.hrEmail || req.query.email || req.decoded.email;
+        const hr = await userCollection.findOne({ email: hrEmail });
+        const employees = await userCollection.find({ hrEmail }).toArray();
+        const members = hr ? [hr, ...employees] : employees;
+        res.send({ members, team: employees, hr: hr || null, total: employees.length });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load team members', error: error.message });
+      }
+    });
+
+    app.get('/employees/hr', verifyToken, async (req, res) => {
+      try {
+        const { email } = req.query;
+        if (!email) return res.status(400).send({ message: 'email is required' });
+        const { limit, skip } = pageParams(req);
+        const query = { hrEmail: email };
+        const total = await userCollection.countDocuments(query);
+        const employees = await userCollection.find(query).skip(skip).limit(limit).toArray();
+        res.send({ employees, total });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load employees', error: error.message });
+      }
+    });
+
     console.log('Asset Management server routes are ready');
   } catch (error) {
     // Never let a database/setup problem stop the HTTP server from listening.
