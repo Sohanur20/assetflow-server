@@ -1,0 +1,1 @@
+{"author":"","dependencies":{"cors":"^2.8.5","dotenv":"^16.4.5","express":"^4.19.2","jsonwebtoken":"^9.0.2","mongodb":"^6.8.0","stripe":"^16.8.0"},"description":"Server side of XYZ Asset Management System (MI-12, assignment12_category_0007)","keywords":[],"license":"ISC","main":"index.js","name":"asset-management-server","scripts":{"start":"node index.js"},"version":"1.0.0"}
