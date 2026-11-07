@@ -138,6 +138,102 @@ async function run() {
       }
     });
 
+    // ---------------- users ----------------
+    const saveUser = async (req, res) => {
+      try {
+        const user = req.body;
+        if (!user?.email) {
+          return res.status(400).send({ message: 'email is required' });
+        }
+        // Upsert-safe: an existing user (e.g. social login re-save) keeps
+        // their stored role, affiliation, package and payment status.
+        const existing = await userCollection.findOne({ email: user.email });
+        if (existing) {
+          return res.send({ message: 'user already exists', insertedId: null });
+        }
+        const isHR = user.role === 'hr';
+        const newUser = {
+          name: user.name || '',
+          email: user.email,
+          photo: user.photo || user.photoURL || '',
+          dob: user.dob || '',
+          role: isHR ? 'hr' : 'employee',
+          // HR-only fields (filled at HR registration)
+          companyName: isHR ? user.companyName || '' : user.companyName || '',
+          companyLogo: isHR ? user.companyLogo || '' : user.companyLogo || '',
+          packageName: isHR ? user.packageName || '' : '',
+          // The limit is granted by payment (POST /payments increments it),
+          // so a freshly registered HR starts at 0 until paid:true.
+          memberLimit: 0,
+          paid: false,
+          // Employee affiliation: null until an HR adds them to a team.
+          // An HR manager is never their own team member, so their
+          // hrEmail stays null even if the client sends one — otherwise
+          // the HR would be counted in their own team count.
+          hrEmail: isHR ? null : user.hrEmail || null,
+          joinedDate: new Date(),
+        };
+        const result = await userCollection.insertOne(newUser);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to save user', error: error.message });
+      }
+    };
+    app.post('/users', saveUser);
+    app.post('/users/social', saveUser); // alias from the plan's API draft
+
+    app.get('/user/:email', verifyToken, async (req, res) => {
+      try {
+        const user = await userCollection.findOne({ email: req.params.email });
+        if (!user) return res.status(404).send({ message: 'user not found' });
+        res.send(user);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load user', error: error.message });
+      }
+    });
+
+    // Profile update: name only (email is readonly). Photo is also accepted
+    // if the client sends one, but no other field can be changed here.
+    app.patch('/users/profile', verifyToken, async (req, res) => {
+      try {
+        const email = req.body?.email || req.decoded.email;
+        const update = {};
+        if (req.body?.name) update.name = req.body.name;
+        if (req.body?.photo) update.photo = req.body.photo;
+        if (!Object.keys(update).length) {
+          return res.status(400).send({ message: 'nothing to update' });
+        }
+        const result = await userCollection.updateOne(
+          { email },
+          { $set: update }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to update profile', error: error.message });
+      }
+    });
+
+    app.get('/unaffiliated-users', verifyToken, async (req, res) => {
+      try {
+        const { limit, skip } = pageParams(req);
+        const { search } = req.query;
+        const query = {
+          role: 'employee',
+          $or: [{ hrEmail: null }, { hrEmail: { $exists: false } }],
+        };
+        if (search) query.name = { $regex: escapeRegex(search), $options: 'i' };
+        const total = await userCollection.countDocuments(query);
+        const users = await userCollection
+          .find(query)
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+        res.send({ users, total });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load users', error: error.message });
+      }
+    });
+
     console.log('Asset Management server routes are ready');
   } catch (error) {
     // Never let a database/setup problem stop the HTTP server from listening.
