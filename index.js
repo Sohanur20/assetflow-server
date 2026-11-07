@@ -674,6 +674,81 @@ async function run() {
       }
     });
 
+    // ---------------- home stats ----------------
+    app.get('/hr-stats', verifyToken, async (req, res) => {
+      try {
+        const email = req.query.email || req.decoded.email;
+
+        const pendingRequests = await requestCollection
+          .find({ hrEmail: email, status: 'pending' })
+          .sort({ requestDate: -1 })
+          .limit(5)
+          .toArray();
+
+        const topRequested = await requestCollection
+          .aggregate([
+            { $match: { hrEmail: email } },
+            {
+              $group: {
+                _id: '$assetName',
+                assetName: { $first: '$assetName' },
+                assetType: { $first: '$assetType' },
+                assetId: { $first: '$assetId' },
+                requestCount: { $sum: 1 },
+              },
+            },
+            { $sort: { requestCount: -1 } },
+            { $limit: 4 },
+          ])
+          .toArray();
+
+        const limitedStock = await assetCollection
+          .find({ hrEmail: email, quantity: { $lt: 10 } })
+          .sort({ quantity: 1 })
+          .toArray();
+
+        const typeCounts = await requestCollection
+          .aggregate([
+            { $match: { hrEmail: email } },
+            { $group: { _id: '$assetType', count: { $sum: 1 } } },
+          ])
+          .toArray();
+        const countOf = (type) =>
+          typeCounts.find((t) => t._id === type)?.count || 0;
+        // Shape ready for a Recharts pie chart.
+        const pieData = [
+          { name: 'returnable', value: countOf('returnable') },
+          { name: 'non-returnable', value: countOf('non-returnable') },
+        ];
+
+        res.send({ pendingRequests, topRequested, limitedStock, pieData });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load HR stats', error: error.message });
+      }
+    });
+
+    app.get('/employee-home', verifyToken, async (req, res) => {
+      try {
+        const email = req.query.email || req.decoded.email;
+
+        const pendingRequests = await requestCollection
+          .find({ requesterEmail: email, status: 'pending' })
+          .sort({ requestDate: -1 })
+          .toArray();
+
+        const now = new Date();
+        const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const monthlyRequests = await requestCollection
+          .find({ requesterEmail: email, requestDate: { $gte: firstOfMonth } })
+          .sort({ requestDate: -1 })
+          .toArray();
+
+        res.send({ pendingRequests, monthlyRequests });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load employee home data', error: error.message });
+      }
+    });
+
     console.log('Asset Management server routes are ready');
   } catch (error) {
     // Never let a database/setup problem stop the HTTP server from listening.
