@@ -507,6 +507,84 @@ async function run() {
       }
     });
 
+    // ---------------- requests ----------------
+    app.post('/requests', verifyToken, async (req, res) => {
+      try {
+        const body = req.body;
+        let asset = null;
+        if (body.assetId && isValidId(body.assetId)) {
+          asset = await assetCollection.findOne({ _id: new ObjectId(body.assetId) });
+        }
+        const request = {
+          assetId: body.assetId || (asset ? String(asset._id) : ''),
+          assetName: body.assetName || asset?.productName || '',
+          assetType: body.assetType || asset?.productType || 'returnable',
+          requesterName: body.requesterName || '',
+          requesterEmail: body.requesterEmail || req.decoded.email,
+          requesterPhoto: body.requesterPhoto || '',
+          hrEmail: body.hrEmail || asset?.hrEmail || '',
+          companyName: body.companyName || asset?.companyName || '',
+          companyLogo: body.companyLogo || asset?.companyLogo || '',
+          additionalNote: body.additionalNote || '',
+          requestDate: new Date(),
+          approvalDate: null,
+          status: 'pending',
+        };
+        const result = await requestCollection.insertOne(request);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'failed to create request', error: error.message });
+      }
+    });
+
+    app.get('/requests/my', verifyToken, async (req, res) => {
+      try {
+        const { search, status, type } = req.query;
+        const email = req.query.email || req.decoded.email;
+        const { limit, skip } = pageParams(req);
+        const query = { requesterEmail: email };
+        if (search) query.assetName = { $regex: escapeRegex(search), $options: 'i' };
+        if (status) query.status = status;
+        if (type) query.assetType = type;
+        const total = await requestCollection.countDocuments(query);
+        const requests = await requestCollection
+          .find(query)
+          .sort({ requestDate: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+        res.send({ requests, total });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load requests', error: error.message });
+      }
+    });
+
+    app.get('/requests/hr', verifyToken, async (req, res) => {
+      try {
+        const { search } = req.query;
+        const email = req.query.email || req.decoded.email;
+        const { limit, skip } = pageParams(req);
+        const query = { hrEmail: email };
+        if (search) {
+          const regex = { $regex: escapeRegex(search), $options: 'i' };
+          query.$or = [{ requesterName: regex }, { requesterEmail: regex }];
+        }
+        const total = await requestCollection.countDocuments(query);
+        const requests = await requestCollection
+          .find(query)
+          .sort({ requestDate: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+        res.send({ requests, total });
+      } catch (error) {
+        res.status(500).send({ message: 'failed to load requests', error: error.message });
+      }
+    });
+
+    const findRequest = (id) =>
+      requestCollection.findOne({ _id: new ObjectId(id) });
+
     console.log('Asset Management server routes are ready');
   } catch (error) {
     // Never let a database/setup problem stop the HTTP server from listening.
